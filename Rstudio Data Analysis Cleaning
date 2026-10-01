@@ -1,0 +1,1963 @@
+# ============================================================
+# Employee attrition Dataset – Data Cleaning Script
+# Module  : Programming for Data Analysis (CT127-3-2)
+# Title   : Employee attrition Classification
+# ============================================================
+# Name1, TP076617 Cheah Xue Xian 
+# Name2, TP076244 Chua Siong Zheng
+# Name3, TP076906 Joanne Lee Jia Tian
+# Name4, TP077096 Lim Shu Ye
+# ============================================================
+
+
+# ── Load required libraries ─────────────────────────────────
+library(dplyr)      # data manipulation verbs
+library(stringr)    # string helper functions
+
+
+# ============================================================
+# STEP 1 – Import raw data
+# ============================================================
+# read.csv() is used to loads the CSV file.
+# na.strings is used to maps blank cells and common NA labels to R's NA so that is.na() 
+# can detect them consistently.
+# stringsAsFactors = FALSE keeps text columns as plain character strings until 
+# converting them later.
+# ============================================================
+
+df <- read.csv("~/downloads/4. dataset_employee_attrition.csv",
+               stringsAsFactors = FALSE,
+               na.strings        = c("", "NA", "N/A"))
+
+cat("=== RAW DATASET ===\n")
+cat("Total rows   :", nrow(df), "\n")
+cat("Total columns:", ncol(df), "\n\n")
+
+
+# ============================================================
+# STEP 2 – Check missing values before cleaning
+# ============================================================
+# is.na() detects NA values, while colSums() counts the dataset per column.
+# This gives a clear picture of the raw data quality before any changes are made.
+# ============================================================
+
+cat("=== STEP 2: Missing values per column (before cleaning) ===\n")
+print(colSums(is.na(df)))
+cat("\nTotal missing values:", sum(is.na(df)), "\n\n")
+
+
+# ------------------------------------------------------------
+# STEP 2b – Inspect unique values in categorical columns
+# ------------------------------------------------------------
+# Convert the data to lowercase before using tolower() so that the unique values
+# shown here are directly matched what str_to_lower() which can produce 
+# in the case_when() mappings in Step 6.
+# This is the evidence that justifies every mapping used.
+# ------------------------------------------------------------
+
+cat("=== STEP 2b: Unique raw values (lowercased) per categorical column ===\n\n")
+
+# Use the original camelCase names as they appear in the raw CSV
+# (column renaming happens in Step 3, so snake_case names don't exist yet)
+unq_raw <- c("Attrition", "BusinessTravel", "Department",
+             "EducationField", "Gender", "JobRole",
+             "MaritalStatus", "OverTime", "Over18")
+
+for (col in unq_raw) {
+  cat(col, ":\n")
+  raw_vals <- df[[col]][!is.na(df[[col]])]
+  sort(unique(tolower(raw_vals))) |> print()
+  cat("\n")
+}
+
+
+# ============================================================
+# STEP 3 – Standardise column names
+# ============================================================
+# As the standard guideline, all column names should be all lowercase with no spaces.
+# tolower() is used to converts to lowercase
+# gsub() replaces canany spaces with underscores.
+# ============================================================
+
+cat("=== STEP 3: Column names before standardisation ===\n")
+print(names(df))
+
+names(df) <- gsub("([a-z])([A-Z])", "\\1_\\2", colnames(df))
+names(df) <- tolower(colnames(df))
+
+cat("\nColumn names after standardisation:\n")
+print(names(df))
+cat("\n")
+
+
+# ============================================================
+# STEP 4 – Drop constant, non-related, and irrelevant columns
+# ============================================================
+# Constant columns (single unique value – no information):
+#   over_18        – always "Y"
+#   employeecount – always 1
+#
+# Non-related identifier column:
+#   employeenumber – row ID, not a predictive feature
+#
+# Rate columns (not meaningful for attrition analysis):
+#   hourlyrate, dailyrate, monthlyrate
+# ============================================================
+
+cols_to_drop <- c("over18", "employee_count", "employee_number",
+                  "hourly_rate", "daily_rate", "monthly_rate")
+
+df <- df %>% select(-any_of(cols_to_drop))
+
+cat("=== STEP 4: Dropped columns ===\n")
+cat(paste(" ", cols_to_drop, collapse = "\n"), "\n\n")
+
+
+# ============================================================
+# STEP 5 – Fix noisy numeric columns
+# ============================================================
+# Several numeric columns contain data-entry errors such as:
+# '?' or '_' characters were appended to the number,
+# e.g. "4_", "31_", "5?", "3?".
+#
+# Fix: str_replace_all() strips every character that is not a digit or 
+# decimal point. 
+# as.numeric() then coerces the cleaned string to a number.
+#
+# Cells that become empty after stripping are set to NA and handled in Step 8
+# (imputation). Therefore, no rows are removed.
+#
+# Column types determined from dataset description:
+#   Numerical Value columns -> numeric_cols below
+#   Categorical coded columns -> handled in Step 6
+# ============================================================
+
+clean_numeric <- function(x) {
+  x_clean <- str_replace_all(as.character(x), "[^0-9.]", "")
+  x_clean[x_clean == ""] <- NA
+  as.numeric(x_clean)
+}
+
+numeric_cols <- c(
+  "age", "distance_from_home", "education",
+  "environment_satisfaction",
+  "job_involvement", "job_level", "job_satisfaction",
+  "monthly_income", "num_companies_worked",
+  "percent_salary_hike", "performance_rating",
+  "relationship_satisfaction", "standard_hours", "stock_option_level",
+  "total_working_years", "training_times_last_year", "work_life_balance",
+  "years_at_company", "years_in_current_role",
+  "years_since_last_promotion", "years_with_curr_manager"
+)
+
+df <- df %>% mutate(across(all_of(numeric_cols), clean_numeric))
+
+cat("=== STEP 5: Stripped noise characters from",
+    length(numeric_cols), "numeric columns ===\n\n")
+
+
+# ============================================================
+# STEP 6 – Standardise categorical column values
+# ============================================================
+# Each categorical column has multiple variants of the same
+# value due to inconsistent data entry:
+#   - Mixed case   : "yes", "YES", "Yes"
+#   - Abbreviations: "ls" instead of "Life Sciences"
+#   - Aliases      : "rare" instead of "Travel Rarely"
+#
+# Fix: str_to_lower() converts everything to lowercase first, then case_when() 
+# maps every known variant to one canonical value as defined in the dataset 
+# description.
+# Evidence for each mapping comes from Step 2b inspection.
+#
+# Values that do not match with any known variant become NA and are handled in 
+# Step 8. Thus, no rows are removed.
+# ============================================================
+
+# ── 6a. attrition ────────────────────────────────────────────
+# Variants found in Step 2b: "0","1","no","yes"
+# Dataset description: 0 = No, 1 = Yes
+df <- df %>%
+  mutate(attrition = case_when(
+    str_to_lower(attrition) %in% c("yes", "1") ~ "Yes",
+    str_to_lower(attrition) %in% c("no",  "0") ~ "No",
+    TRUE ~ NA_character_
+  ))
+
+# ── 6b. over_time ─────────────────────────────────────────────
+# Variants found in Step 2b: "0","1","no","yes"
+# Dataset description: 1 = No, 2 = Yes
+df <- df %>%
+  mutate(over_time = case_when(
+    str_to_lower(over_time) %in% c("yes", "2") ~ "Yes",
+    str_to_lower(over_time) %in% c("no", "1")  ~ "No",
+    TRUE ~ NA_character_
+  ))
+
+# ── 6c. gender ───────────────────────────────────────────────
+# Variants found in Step 2b: "f","female","m","male"
+# Dataset description: 1 = Female, 2 = Male
+df <- df %>%
+  mutate(gender = case_when(
+    str_to_lower(gender) %in% c("f", "female") ~ "Female",
+    str_to_lower(gender) %in% c("m", "male")   ~ "Male",
+    TRUE ~ NA_character_
+  ))
+
+# ── 6d. marital_status ────────────────────────────────────────
+# Variants found in Step 2b: "divorced","married","single"
+# Dataset description: 1=Divorced, 2=Married, 3=Single
+df <- df %>%
+  mutate(marital_status = case_when(
+    str_to_lower(marital_status) == "single"   ~ "Single",
+    str_to_lower(marital_status) == "married"  ~ "Married",
+    str_to_lower(marital_status) == "divorced" ~ "Divorced",
+    TRUE ~ NA_character_
+  ))
+
+# ── 6e. department ───────────────────────────────────────────
+# Variants found in Step 2b: "hr","human resources",
+#   "r&d","research & development","sale","sales"
+# Dataset description: 1=HR, 2=R&D, 3=Sales
+df <- df %>%
+  mutate(department = case_when(
+    str_to_lower(department) %in%
+      c("r&d", "research & development",
+        "research and development")       ~ "Research & Development",
+    str_to_lower(department) %in%
+      c("sale", "sales")                 ~ "Sales",
+    str_to_lower(department) %in%
+      c("hr", "human resources")         ~ "Human Resources",
+    TRUE ~ NA_character_
+  ))
+
+# ── 6f. business_travel ───────────────────────────────────────
+# Variants found in Step 2b: "frequent","nil","non-travel",
+#   "rare","travel_frequently","travel_rarely"
+# Dataset description: 1=No Travel, 2=Travel Frequently,
+#                      3=Travel Rarely
+df <- df %>%
+  mutate(business_travel = case_when(
+    str_to_lower(business_travel) %in%
+      c("nil", "non-travel", "non_travel", "none") ~ "No Travel",
+    str_to_lower(business_travel) %in%
+      c("rare", "travel_rarely")                   ~ "Travel Rarely",
+    str_to_lower(business_travel) %in%
+      c("frequent", "travel_frequently")           ~ "Travel Frequently",
+    TRUE ~ NA_character_
+  ))
+
+# ── 6g. education_field ───────────────────────────────────────
+# Variants found in Step 2b: "hr","human resources",
+#   "life sciences","ls","marketing","med","medical",
+#   "mkt","other","td","technical degree"
+# Dataset description: 1=HR, 2=Life Sciences, 3=Marketing,
+#                      4=Medical, 5=Other, 6=Technical Degree
+df <- df %>%
+  mutate(education_field = case_when(
+    str_to_lower(education_field) %in%
+      c("ls", "life sciences", "life_sciences") ~ "Life Sciences",
+    str_to_lower(education_field) %in%
+      c("med", "medical", "medical sciences")   ~ "Medical",
+    str_to_lower(education_field) %in%
+      c("mkt", "marketing")                     ~ "Marketing",
+    str_to_lower(education_field) %in%
+      c("td", "technical degree", "technical")  ~ "Technical Degree",
+    str_to_lower(education_field) %in%
+      c("hr", "human resources")                ~ "Human Resources",
+    str_to_lower(education_field) %in%
+      c("other", "others")                      ~ "Other",
+    TRUE ~ NA_character_
+  ))
+
+# ── 6h. job_.role ──────────────────────────────────────────────
+# Variants found in Step 2b: "healthcare rep",
+#   "healthcare representative","hr","human resources",
+#   "lab technician","laboratory technician","manager",
+#   "manufacture director","manufacturing director",
+#   "research director","research scientist",
+#   "sales exe","sales executive","sales rep",
+#   "sales representative"
+# Dataset description: 9 roles + Healthcare Representative
+df <- df %>%
+  mutate(job_role = case_when(
+    str_to_lower(job_role) %in%
+      c("hr representative")                                 ~ "HR Representative",
+    str_to_lower(job_role) %in%
+      c("hr", "human resources")                           ~ "Human Resources",
+    str_to_lower(job_role) %in%
+      c("lab technician", "laboratory technician")         ~ "Laboratory Technician",
+    str_to_lower(job_role) %in%
+      c("manager")                                         ~ "Manager",
+    str_to_lower(job_role) %in%
+      c("manufacturing director", "manufacture director")  ~ "Manufacturing Director",
+    str_to_lower(job_role) %in%
+      c("research director")                               ~ "Research Director",
+    str_to_lower(job_role) %in%
+      c("research scientist")                              ~ "Research Scientist",
+    str_to_lower(job_role) %in%
+      c("sales executive", "sales exe")                    ~ "Sales Executive",
+    str_to_lower(job_role) %in%
+      c("sales representative", "sales rep")               ~ "Sales Representative",
+    str_to_lower(job_role) %in%
+      c("healthcare representative", "healthcare rep")     ~ "Healthcare Representative",
+    TRUE ~ NA_character_
+  ))
+
+
+# ============================================================
+# STEP 7 – Remove duplicate rows
+# ============================================================
+# Lab guideline: use distinct() to remove duplicates and
+# display how many rows were removed.
+# distinct() keeps the first occurrence of each unique row.
+# ============================================================
+
+n_before  <- nrow(df)
+df        <- df %>% distinct()
+n_removed <- n_before - nrow(df)
+
+cat("=== STEP 7: Duplicate rows ===\n")
+cat("Rows before:", n_before,  "\n")
+cat("Rows after :", nrow(df),  "\n")
+cat("Removed    :", n_removed, "\n\n")
+
+
+# ============================================================
+# STEP 8 – Replace missing values (NA imputation)
+# ============================================================
+# Lab guideline:
+#   Numeric columns     -> median()
+#   Categorical columns -> mode (most frequent value)
+#
+# Some columns use GROUPED imputation because their values are logically 
+# dependent on other columns.
+# ORDER MATTERS – columns used as grouping variables must be imputed BEFORE the 
+# columns that depend on them:
+#
+#   1. performance_rating  (used to group percent_salary_hike)
+#   2. job_role            (grouped by department + job_level)
+#   3. job_level           (grouped by department + job_role)
+#   4. percent_salary_hike  (grouped by performance_rating)
+#   5. monthly_income      (grouped by job_level)
+#   6. stock_option_level   (grouped by job_level)
+#   7. education_field     (grouped by department + job_role)
+#   8. all other numeric  -> global median
+#   9. all other categorical -> global mode
+#  10. final fallback     -> catch any remaining NAs
+# ============================================================
+
+# Helper: compute statistical mode for a character vector
+get_mode <- function(x) {
+  x  <- x[!is.na(x)]
+  ux <- unique(x)
+  ux[which.max(tabulate(match(x, ux)))]
+}
+
+# ── 8a. performance_rating – global median ────────────────────
+# Imputed first; used as group key for percent_salary_hike in Step 8e.
+# round() ensures the result is a valid integer level (1–4) for factor conversion.
+df <- df %>%
+  mutate(performance_rating = ifelse(
+    is.na(performance_rating),
+    round(median(performance_rating, na.rm = TRUE)),
+    performance_rating))
+
+cat("STEP 8a – performance_rating : MEDIAN global (imputed first,\n")
+cat("          used as group key for percent_salary_hike)\n")
+
+# ── 8b. department – mode grouped by job_role ─────────────────
+# department must be imputed before job_role since job_role
+# uses department as a grouping key in Step 8c.
+df <- df %>%
+  group_by(job_role) %>%
+  mutate(department = coalesce(department, get_mode(department))) %>%
+  ungroup() %>%
+  
+  # Step 3: Global fallback just in case Job Role was also completely blank
+  mutate(department = coalesce(department, get_mode(department)))
+
+cat("STEP 8b – department        : MODE grouped by job_role\n")
+
+# ── 8c. job_role – mode grouped by department + job_level ──────
+# job_role depends on BOTH department AND job_level.
+# e.g. R&D + Level 1 -> Research Scientist
+#      Sales + Level 2 -> Sales Executive
+
+# Primary: department + job_level group
+df <- df %>%
+  group_by(department, job_level) %>%
+  mutate(job_role = ifelse(
+    is.na(job_role), get_mode(job_role), job_role)) %>%
+  ungroup()
+
+# Fallback 1: department only (if job_level also blank)
+df <- df %>%
+  group_by(department) %>%
+  mutate(job_role = ifelse(
+    is.na(job_role), get_mode(job_role), job_role)) %>%
+  ungroup()
+
+# Fallback 2: global mode
+df <- df %>%
+  mutate(job_role = ifelse(
+    is.na(job_role), get_mode(job_role), job_role))
+
+cat("STEP 8c – job_role           : MODE grouped by department + job_level\n")
+
+# ── 8d. job_level – median grouped by department + job_role ────
+# job_role already filled above so this grouping is reliable.
+# e.g. Manager -> level 4-5, Lab Technician -> level 1
+
+df <- df %>%
+  group_by(department, job_role) %>%
+  mutate(job_level = ifelse(
+    is.na(job_level), round(median(job_level, na.rm = TRUE)), job_level)) %>%
+  ungroup()
+
+# Fallback: global median
+df <- df %>%
+  mutate(job_level = ifelse(
+    is.na(job_level), round(median(job_level, na.rm = TRUE)), job_level))
+
+cat("STEP 8d – job_level          : MEDIAN grouped by department + job_role\n")
+
+# ── 8e. percent_salary_hike – mode grouped by performance_rating ─
+# Hike % is directly tied to performance review rating.
+# performance_rating already imputed in Step 8b.
+df <- df %>%
+  group_by(performance_rating) %>%
+  mutate(percent_salary_hike = ifelse(
+    is.na(percent_salary_hike),
+    median(percent_salary_hike, na.rm = TRUE),    
+    percent_salary_hike)) %>%
+  ungroup()
+
+cat("STEP 8e – percent_salary_hike : MODE grouped by performance_rating\n")
+
+# ── 8f. monthly_income – median grouped by job_level ───────────
+# Correlation with job_level r = 0.69
+# Level 1 median ~ 2,859  vs  Level 5 median ~ 19,094
+# Global median (4,998) would be wrong for Level 4/5 employees
+df <- df %>%
+  group_by(job_level) %>%
+  mutate(monthly_income = ifelse(
+    is.na(monthly_income),
+    median(monthly_income, na.rm = TRUE),
+    monthly_income)) %>%
+  ungroup()
+
+cat("STEP 8f – monthly_income     : MEDIAN grouped by job_level\n")
+
+# ── 8g. stock_option_level – mode grouped by job_level ──────────
+# Level 1-2 predominantly StockOption 0
+# Level 3-5 predominantly StockOption 1
+df <- df %>%
+  group_by(job_level) %>%
+  mutate(stock_option_level = ifelse(
+    is.na(stock_option_level), get_mode(stock_option_level), stock_option_level)) %>%
+  ungroup()
+
+# Fallback: global mode
+df <- df %>%
+  mutate(stock_option_level = ifelse(
+    is.na(stock_option_level), get_mode(stock_option_level), stock_option_level))
+
+cat("STEP 8g – stock_option_level  : MODE grouped by job_level\n")
+
+# ── 8h. education_field – mode grouped by department + job_role
+# education_field is linked to both department and job role.
+# e.g. R&D  + Lab Technician  -> Life Sciences
+#      Sales + Sales Executive -> Marketing (mode = 122)
+#      HR   + Human Resources  -> Human Resources
+
+# Primary: department + job_role group
+df <- df %>%
+  group_by(department, job_role) %>%
+  mutate(education_field = ifelse(
+    is.na(education_field),
+    get_mode(education_field),
+    education_field)) %>%
+  ungroup()
+
+# Fallback 1: department only
+df <- df %>%
+  group_by(department) %>%
+  mutate(education_field = ifelse(
+    is.na(education_field),
+    get_mode(education_field),
+    education_field)) %>%
+  ungroup()
+
+# Fallback 2: global mode (Life Sciences)
+df <- df %>%
+  mutate(education_field = ifelse(
+    is.na(education_field),
+    get_mode(education_field),
+    education_field))
+
+cat("STEP 8h – education_field    : MODE grouped by department + job_role\n")
+
+# ── 8i. remaining likert / count columns – median ────────────
+# Likert scales (e.g. 1-4, 1-5) and count columns use median
+# to stay within the valid integer range of the scale.
+# Note: performance_rating already handled in Step 8a (excluded here).
+other_numeric <- c("education", "job_involvement",
+                   "relationship_satisfaction", "work_life_balance",
+                   "num_companies_worked", "training_times_last_year")
+
+df <- df %>%
+  mutate(across(all_of(other_numeric),
+                ~ ifelse(is.na(.), round(median(., na.rm = TRUE)), .)))
+
+cat("STEP 8i – other numeric     : MEDIAN global\n")
+
+# ── 8i2. job_satisfaction & environment_satisfaction – mode ────
+df <- df %>%
+  mutate(
+    job_satisfaction         = ifelse(is.na(job_satisfaction),
+                                      get_mode(job_satisfaction), job_satisfaction),
+    environment_satisfaction = ifelse(is.na(environment_satisfaction),
+                                      get_mode(environment_satisfaction), environment_satisfaction)
+  )
+
+cat("STEP 8i2 – job_satisfaction & environment_satisfaction : MODE global\n")
+
+# ── 8j. gender – "Prefer Not to Say" for blank ───────────────
+df <- df %>%
+  mutate(gender = ifelse(is.na(gender), "Prefer Not to Say", gender))
+
+cat("STEP 8j – gender            : NAs filled with 'Prefer Not to Say'\n")
+
+# ── 8k. marital_status – "Prefer Not to Say" for blank ────────
+df <- df %>%
+  mutate(marital_status = ifelse(is.na(marital_status), "Prefer Not to Say", marital_status))
+
+cat("STEP 8k – marital_status     : NAs filled with 'Prefer Not to Say'\n")
+
+
+# ------------------------------------------------------------
+# STEP 8l – business_travel – mode grouped by department + job_role
+# ------------------------------------------------------------
+# attrition is the target variable. Rows with no value
+# fallback: if the job_role+department group was entirely blank, use job_role alone
+# ------------------------------------------------------------
+df <- df %>%
+  group_by(job_role, job_level) %>%
+  mutate(business_travel = coalesce(business_travel, get_mode(business_travel))) %>%
+  ungroup() %>%
+  group_by(job_role) %>%
+  mutate(business_travel = coalesce(business_travel, get_mode(business_travel))) %>%
+  ungroup() %>%
+  # final fallback: global mode
+  mutate(business_travel = coalesce(business_travel, get_mode(business_travel)))
+
+
+# STEP 8m – Remove rows where attrition is blank
+# ------------------------------------------------------------
+# attrition is the target variable. Therefore, rows with no value
+# cannot be used for analysis and are dropped entirely.
+
+n_before_attr <- nrow(df)
+df <- df %>% filter(!is.na(attrition))
+n_removed_attr <- n_before_attr - nrow(df)
+
+cat("=== STEP 8m: Rows removed (attrition is blank) ===\n")
+cat("Removed :", n_removed_attr, "\n")
+cat("Remaining:", nrow(df), "\n\n")
+
+
+# ── 8n. remaining categorical columns – global mode ──────────
+other_cat <- c("over_time")
+
+df <- df %>%
+  mutate(across(all_of(other_cat),
+                ~ ifelse(is.na(.), get_mode(.), .)))
+
+cat("STEP 8n – other categorical : MODE global\n")
+
+cat("\nTotal remaining NAs after imputation:", sum(is.na(df)), "\n\n")
+
+
+# ============================================================
+# STEP 8o – Post-imputation check and final fallback
+# ============================================================
+# Check if any NAs remain after all imputation steps.
+# Apply a final global fallback to catch any rows that slipped through 
+# (e.g. rows where ALL grouping columns were also blank).
+# ============================================================
+
+cat("=== STEP 8o: Post-imputation check ===\n")
+remaining <- colSums(is.na(df))
+if (sum(remaining) > 0) {
+  cat("Columns still with NAs:\n")
+  print(remaining[remaining > 0])
+  
+  # Final fallback: numeric -> median, character -> mode
+  for (col in names(df)) {
+    if (sum(is.na(df[[col]])) > 0) {
+      if (is.numeric(df[[col]])) {
+        df[[col]][is.na(df[[col]])] <- median(df[[col]], na.rm = TRUE)
+      } else {
+        df[[col]][is.na(df[[col]])] <- get_mode(df[[col]])
+      }
+    }
+  }
+}
+
+cat("Total remaining NAs after final fallback:", sum(is.na(df)), "\n\n")
+
+
+# ============================================================
+# STEP 9 – Validate out-of-range values
+# ============================================================
+# Each coded/Likert column has a defined valid range from the
+# dataset description. Any value outside the range is capped
+# at the boundary (Winsorising). Rows are kept.
+# ============================================================
+
+range_rules <- list(
+  education                = c(1, 5),   # 1=Below College, 5=Doctor
+  environment_satisfaction  = c(1, 4),   # 1=Low, 4=Very High
+  job_involvement           = c(1, 4),   # 1=Low, 4=Very High
+  job_level                 = c(1, 5),   # 1 to 5
+  job_satisfaction          = c(1, 4),   # 1=Low, 4=Very High
+  performance_rating        = c(1, 4),   # 1=Low, 4=Outstanding
+  relationship_satisfaction = c(1, 4),   # 1=Low, 4=Very High
+  stock_option_level         = c(0, 3),   # 0 to 3
+  work_life_balance          = c(1, 4),   # 1=Bad, 4=Best
+  age                      = c(18, 65), # working age range
+  percent_salary_hike        = c(11, 25), # valid hike range
+  num_companies_worked       = c(0, 9),   # 0 to 9
+  training_times_last_year    = c(0, 6)    # 0 to 6 sessions
+)
+
+cat("=== STEP 9: Range validation ===\n")
+any_capped <- FALSE
+for (col in names(range_rules)) {
+  lo    <- range_rules[[col]][1]
+  hi    <- range_rules[[col]][2]
+  n_out <- sum(df[[col]] < lo | df[[col]] > hi, na.rm = TRUE)
+  if (n_out > 0) {
+    cat("  Capped", n_out, "value(s) in [", col,
+        "] to range [", lo, ",", hi, "]\n")
+    df[[col]] <- pmax(pmin(df[[col]], hi), lo)
+    any_capped <- TRUE
+  }
+}
+if (!any_capped) cat("  No out-of-range values detected.\n")
+cat("\n")
+
+
+# ============================================================
+# STEP 10 – Fix logical inconsistencies between year columns
+# ============================================================
+# These columns must satisfy a logical hierarchy:
+#
+#   tota_lworking_years     <= age - 18
+#     Cannot have worked more years than possible given age
+#     (assuming minimum working age of 18)
+#
+#   years_at_company        <= total_workingy_ears
+#     Cannot have been at this company longer than total career
+#
+#   years_in_current_role    <= years_at_company
+#   years_with_curr_manager  <= years_at_company
+#   years_since_last_promotion <= years_at_company
+#     Cannot exceed total time spent at the company
+#
+# Data check found:
+#    99 rows violating Rule 1
+#   151 rows violating Rule 2
+#   165 rows violating Rule 3 (years_in_current_role)
+#   154 rows violating Rule 3 (years_with_curr_manager)
+#    92 rows violating Rule 3 (years_since_last_promotion)
+#
+# Fix: cap the dependent column at the value of the parent
+# column using pmin(). Rows are kept.
+# ============================================================
+
+# Rule 1: total_working_years cannot exceed age - 18
+df <- df %>%
+  mutate(total_working_years = pmin(total_working_years, age - 18))
+
+# Rule 2: years_at_company cannot exceed total_working_years
+df <- df %>%
+  mutate(years_at_company = pmin(years_at_company, total_working_years))
+
+# Rule 3: sub-company columns cannot exceed years_at_company
+df <- df %>%
+  mutate(
+    years_in_current_role      = pmin(years_in_current_role,      years_at_company),
+    years_with_curr_manager    = pmin(years_with_curr_manager,    years_at_company),
+    years_since_last_promotion = pmin(years_since_last_promotion, years_at_company)
+  )
+
+cat("=== STEP 10: Logical year consistency fixed ===\n")
+cat("  Rule 1: total_working_years     capped at age - 18\n")
+cat("  Rule 2: years_at_company        capped at total_working_years\n")
+cat("  Rule 3: years_in_current_role    capped at years_at_company\n")
+cat("          years_with_curr_manager  capped at years_at_company\n")
+cat("          years_since_last_promotion capped at years_at_company\n\n")
+
+
+# ============================================================
+# STEP 11 – Convert coded columns to factors
+# ============================================================
+# Lab guideline: use as.factor() and check levels().
+#
+# Two types of factors:
+#   Ordered – columns with meaningful rank order
+#             e.g. Education: Below College < College < ...
+#   Nominal – unordered categories
+#             e.g. gender, department, job_role
+# ============================================================
+
+# --- Ordered factors ---
+df$education <- factor(df$education,
+                       levels  = 1:5,
+                       labels  = c("Below College", "College",
+                                   "Bachelor", "Master", "Doctor"),
+                       ordered = TRUE)
+
+df$environment_satisfaction <- factor(df$environment_satisfaction,
+                                      levels  = 1:4,
+                                      labels  = c("Low", "Medium",
+                                                  "High", "Very High"),
+                                      ordered = TRUE)
+
+df$job_involvement <- factor(df$job_involvement,
+                             levels  = 1:4,
+                             labels  = c("Low", "Medium",
+                                         "High", "Very High"),
+                             ordered = TRUE)
+
+df$job_satisfaction <- factor(df$job_satisfaction,
+                              levels  = 1:4,
+                              labels  = c("Low", "Medium",
+                                          "High", "Very High"),
+                              ordered = TRUE)
+
+df$performance_rating <- factor(df$performance_rating,
+                                levels  = 1:4,
+                                labels  = c("Low", "Good",
+                                            "Excellent", "Outstanding"),
+                                ordered = TRUE)
+
+df$relationship_satisfaction <- factor(df$relationship_satisfaction,
+                                       levels  = 1:4,
+                                       labels  = c("Low", "Medium",
+                                                   "High", "Very High"),
+                                       ordered = TRUE)
+
+df$work_life_balance <- factor(df$work_life_balance,
+                               levels  = 1:4,
+                               labels  = c("Bad", "Good",
+                                           "Better", "Best"),
+                               ordered = TRUE)
+
+df$job_level <- factor(df$job_level,
+                       levels  = 1:5,
+                       ordered = TRUE)
+
+df$stock_option_level <- factor(df$stock_option_level,
+                                levels  = 0:3,
+                                ordered = TRUE)
+
+# --- Nominal factors ---
+df$attrition <- factor(df$attrition,
+                       levels = c("No", "Yes"))
+
+df$business_travel <- factor(df$business_travel,
+                             levels = c("No Travel",
+                                        "Travel Rarely",
+                                        "Travel Frequently"))
+
+df$department     <- factor(df$department)
+df$education_field <- factor(df$education_field)
+
+df$gender <- factor(df$gender,
+                    levels = c("Female", "Male", "Prefer Not to Say"))
+
+df$job_role <- factor(df$job_role)
+
+df$marital_status <- factor(df$marital_status,
+                            levels = c("Single", "Married", "Divorced", "Prefer Not to Say"))
+
+df$over_time <- factor(df$over_time,
+                       levels = c("No", "Yes"))
+
+cat("=== STEP 11: Factor conversion complete ===\n")
+cat("Levels of attrition            :", levels(df$attrition),               "\n")
+cat("Levels of education            :", levels(df$education),               "\n")
+cat("Levels of job_satisfaction      :", levels(df$job_satisfaction),         "\n")
+cat("Levels of work_life_balance      :", levels(df$work_life_balance),         "\n")
+cat("Levels of performance_rating    :", levels(df$performance_rating),       "\n")
+cat("Levels of environmentsat.      :", levels(df$environment_satisfaction), "\n")
+cat("Levels of gender               :", levels(df$gender),                  "\n")
+cat("Levels of business_travel       :", levels(df$business_travel),          "\n")
+cat("Levels of job_level             :", levels(df$job_level),                "\n")
+cat("Levels of stock_option_level     :", levels(df$stock_option_level),        "\n\n")
+
+
+# ============================================================
+# STEP 12 – Final validation summary
+# ============================================================
+
+cat("=== FINAL CLEANED DATASET SUMMARY ===\n")
+cat("Rows          :", nrow(df), "\n")
+cat("Total columns :", ncol(df), "\n")
+cat("Remaining NAs :", sum(is.na(df)), "\n\n")
+
+cat("Dataset structure:\n")
+str(df)
+
+cat("\nFirst 6 rows:\n")
+print(head(df))
+
+cat("\nAttrition distribution (target variable):\n")
+print(table(df$attrition))
+cat("\nAttrition proportion (%):\n")
+print(round(prop.table(table(df$attrition)) * 100, 1))
+
+cat("\nMonthly income by job_level (after cleaning):\n")
+print(
+  df %>%
+    group_by(job_level) %>%
+    summarise(
+      median_income = median(monthly_income),
+      mean_income   = round(mean(monthly_income)),
+      n             = n()
+    )
+)
+
+
+# ============================================================
+# STEP 13 – Export cleaned dataset (used in analysis)
+# ============================================================
+#if lecture want, then take out the comment
+#write.csv(df, "employee_attrition_clean.csv",
+#          row.names = FALSE, na = "")
+
+cat("\nExported to: employee_attrition_clean.csv\n")
+cat("Rows   :", nrow(df), "\n")
+cat("Columns:", ncol(df), "\n")
+cat("Data cleaning complete.\n")
+
+
+
+
+# ============================================================
+# Chua Siong Zheng, TP076617
+# ============================================================
+# OBJECTIVE 2 (TP076617 - Chua Siong Zheng):
+# To investigate the impact of career stagnation on employee
+# attrition within the organisation. Career stagnation refers
+# to a state where an employee remains in the same role for
+# an extended period without advancement or recognition
+# through promotion.
+#
+# Variables Used:
+#   - years_in_current_role      : Duration employee has been in same role
+#   - years_since_last_promotion : Time elapsed since last promotion
+#   - job_level                : Current rank/seniority (1=Entry, 5=Senior)
+#   - job_role                 : Employee's job function (segmentation)
+#
+# Analysis 2-1: [DESCRIPTIVE]
+#               What does the career stagnation profile look like
+#               for employees who left vs stayed?
+#
+# Analysis 2-2: [DIAGNOSTIC]
+#               Why are certain employees more prone to stagnation
+#               and how does it relate to attrition?
+#
+# ============================================================
+
+
+# ── Load required libraries ──────────────────────────────────
+library(dplyr)      # data manipulation
+library(ggplot2)    # visualisation
+
+
+# ============================================================
+# LOAD DATASET
+# ============================================================
+
+getwd()
+setwd("C:\\Users\\edwin\\OneDrive - Asia Pacific University of Technology And Innovation (APU)\\Assignment Files\\Data Analysis (R Studio)")
+
+df <- read.csv(
+  "employee_attrition_clean.csv",
+  stringsAsFactors = FALSE,
+  na.strings        = c("", "NA", "N/A")
+)
+
+# Convert key columns to correct types
+df$attrition  <- factor(df$attrition,  levels = c("No", "Yes"))
+df$job_role    <- factor(df$job_role)
+df$job_level   <- factor(df$job_level, levels = 1:5, ordered = TRUE)
+
+cat("Dataset loaded:", nrow(df), "rows,", ncol(df), "columns\n")
+cat("Attrition distribution:\n")
+print(table(df$attrition))
+
+
+# ============================================================
+# FEATURE ENGINEERING – Derived Stagnation Variables
+# ============================================================
+# These mutated variables are used across ALL four analyses.
+#
+# stagnation_score:
+#   Combined raw measure of career stagnation.
+#   Higher score = longer stuck with no role change or promotion.
+#   Formula: years_in_current_role + years_since_last_promotion
+#
+# stagnation_category:
+#   Bucketed version of stagnation_score for easier interpretation.
+#   Low    (0-4)  : Recently promoted or in role, low stagnation risk
+#   Medium (5-9)  : Moderate stagnation, monitoring recommended
+#   High   (10+)  : Extended stagnation, high attrition risk
+#
+# ============================================================
+
+df <- df %>%
+  mutate(
+    stagnation_score    = years_in_current_role + years_since_last_promotion,
+    stagnation_category = case_when(
+      stagnation_score <= 4  ~ "Low",
+      stagnation_score <= 9  ~ "Medium",
+      TRUE                   ~ "High"
+    )
+  )
+
+# Set factor order for stagnation_category so plots render logically
+df$stagnation_category <- factor(
+  df$stagnation_category,
+  levels = c("Low", "Medium", "High")
+)
+
+cat("\nStagnation Category distribution:\n")
+print(table(df$stagnation_category))
+
+
+# ============================================================
+# ANALYSIS 2-1: DESCRIPTIVE
+# What does the career stagnation profile look like
+# for employees who left vs stayed?
+# ============================================================
+# Technique: Summary statistics + bar/box charts
+# Goal     : Understand the shape and magnitude of stagnation
+#            across attrition groups (Yes vs No).
+# ============================================================
+
+cat("\n=== ANALYSIS 2-1: DESCRIPTIVE ===\n")
+
+
+# ── 2-1a: Stagnation attrition RATE per category ────────────
+# Rate view removes the effect of category size, giving a fair
+# comparison of how likely each stagnation group is to leave.
+
+attrition_rate_cat <- df %>%
+  group_by(stagnation_category) %>%
+  summarise(
+    total         = n(),
+    left          = sum(attrition == "Yes"),
+    attrition_pct = round(left / total * 100, 1),
+    .groups = "drop"
+  )
+
+cat("\nAttrition Rate by Stagnation Category:\n")
+print(attrition_rate_cat)
+
+plot_2_1a <- ggplot(attrition_rate_cat,
+                    aes(x = stagnation_category, y = attrition_pct,
+                        fill = stagnation_category)) +
+  geom_col(width = 0.6) +
+  geom_text(aes(label = paste0(attrition_pct, "%")),
+            vjust = -0.5, size = 4, fontface = "bold") +
+  scale_fill_manual(values = c("Low"    = "#4CAF50",
+                               "Medium" = "#FF9800",
+                               "High"   = "#F44336")) +
+  labs(
+    title = "Analysis 2-1a: Attrition Rate (%) by Stagnation Category",
+    x     = "Stagnation Category",
+    y     = "Attrition Rate (%)"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(legend.position = "none",
+        plot.title = element_text(face = "bold"))
+
+print(plot_2_1a)
+
+
+# ── 2-1b: Boxplot – stagnation score by attrition ───────────
+# Shows spread and median of raw stagnation score per group.
+
+plot_2_1b <- ggplot(df, aes(x = attrition, y = stagnation_score,
+                            fill = attrition)) +
+  geom_boxplot(outlier.alpha = 0.3) +
+  scale_fill_manual(values = c("No" = "#2196F3", "Yes" = "#F44336")) +
+  labs(
+    title = "Analysis 2-1b: Stagnation Score Distribution by Attrition",
+    x     = "Attrition",
+    y     = "Stagnation Score (years_in_current_role + years_since_last_promotion)"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(legend.position = "none",
+        plot.title = element_text(face = "bold"))
+
+print(plot_2_1b)
+
+cat("\nMedian Stagnation Score by Attrition:\n")
+df %>%
+  group_by(attrition) %>%
+  summarise(
+    median_score = median(stagnation_score),
+    mean_score   = round(mean(stagnation_score), 2),
+    .groups = "drop"
+  ) %>%
+  print()
+
+
+# ── 2-1c: Attrition rate by job role ────────────────────────
+# Reveals which job roles have the highest share of leavers.
+
+attrition_by_role <- df %>%
+  group_by(job_role) %>%
+  summarise(
+    total         = n(),
+    left          = sum(attrition == "Yes"),
+    attrition_pct = round(left / total * 100, 1),
+    .groups = "drop"
+  ) %>%
+  arrange(desc(attrition_pct))
+
+cat("\nAttrition Rate by Job Role:\n")
+print(attrition_by_role)
+
+plot_2_1c <- ggplot(attrition_by_role,
+                    aes(x = reorder(job_role, attrition_pct),
+                        y = attrition_pct, fill = attrition_pct)) +
+  geom_col() +
+  geom_text(aes(label = paste0(attrition_pct, "%")),
+            hjust = -0.1, size = 3.5) +
+  scale_fill_gradient(low = "#FFF9C4", high = "#F44336") +
+  coord_flip() +
+  labs(
+    title = "Analysis 2-1c: Attrition Rate (%) by Job Role",
+    x     = "Job Role",
+    y     = "Attrition Rate (%)",
+    fill  = "Attrition %"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(plot.title = element_text(face = "bold")) +
+  expand_limits(y = max(attrition_by_role$attrition_pct) + 8)
+
+print(plot_2_1c)
+
+
+# ============================================================
+# ANALYSIS 2-2: DIAGNOSTIC
+# Why are certain employees more prone to stagnation
+# and how does it relate to attrition?
+# ============================================================
+# Technique: Grouped bar chart, Chi-square test,
+#            Bar chart by job role, Stacked bar by job level
+# Goal     : Identify which roles and levels are most stagnant,
+#            and whether stagnation is significantly associated
+#            with attrition.
+# ============================================================
+
+cat("\n=== ANALYSIS 2-2: DIAGNOSTIC ===\n")
+
+
+# ── 2-2a: Bar Chart – Average Stagnation Score by Job Role ──
+# Shows which job roles have the highest average stagnation score.
+# Bars are coloured by that role's attrition rate to reveal
+# whether high-stagnation roles also have high attrition.
+
+stag_by_role <- df %>%
+  group_by(job_role) %>%
+  summarise(
+    avg_stagnation = round(mean(stagnation_score), 2),
+    attrition_pct  = round(sum(attrition == "Yes") / n() * 100, 1),
+    .groups = "drop"
+  )
+
+cat("\nAverage Stagnation Score and Attrition Rate by Job Role:\n")
+print(as.data.frame(stag_by_role))
+
+plot_2_2a <- ggplot(stag_by_role,
+                    aes(x = reorder(job_role, avg_stagnation),
+                        y = avg_stagnation,
+                        fill = attrition_pct)) +
+  geom_col(width = 0.7) +
+  geom_text(aes(label = avg_stagnation),
+            hjust = -0.2, size = 3.5, fontface = "bold") +
+  scale_fill_gradient(low = "#C8E6C9", high = "#F44336",
+                      name = "Attrition Rate (%)") +
+  coord_flip() +
+  labs(
+    title    = "Analysis 2-2a: Average Stagnation Score by Job Role",
+    subtitle = "Bar colour = attrition rate of that role (red = higher attrition)",
+    x        = "Job Role",
+    y        = "Average Stagnation Score"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(plot.title = element_text(face = "bold")) +
+  expand_limits(y = max(stag_by_role$avg_stagnation) + 1.5)
+
+print(plot_2_2a)
+
+
+# ── 2-2b: Stacked Bar Chart – Stagnation Category by Job Level ──
+# Shows the proportion of Low / Medium / High stagnation
+# within each job level (1=Entry to 5=Senior).
+# Helps identify whether lower-level employees stagnate more,
+# which informs where HR should focus promotion pipeline efforts.
+
+stag_level_pct <- df %>%
+  group_by(job_level, stagnation_category) %>%
+  summarise(n = n(), .groups = "drop") %>%
+  group_by(job_level) %>%
+  mutate(pct = round(n / sum(n) * 100, 1)) %>%
+  ungroup()
+
+cat("\nStagnation Category Proportion by Job Level:\n")
+print(as.data.frame(stag_level_pct))
+
+plot_2_2b <- ggplot(stag_level_pct,
+                    aes(x = job_level,
+                        y = pct,
+                        fill = stagnation_category)) +
+  geom_col(position = "stack", width = 0.6) +
+  geom_text(aes(label = paste0(pct, "%")),
+            position = position_stack(vjust = 0.5),
+            size = 3.5, fontface = "bold", colour = "white") +
+  scale_fill_manual(values = c("Low"    = "#4CAF50",
+                               "Medium" = "#FF9800",
+                               "High"   = "#F44336"),
+                    name = "Stagnation Level") +
+  labs(
+    title    = "Analysis 2-2b: Stagnation Category Distribution by Job Level",
+    subtitle = "Proportion of Low / Medium / High stagnation within each job level",
+    x        = "Job Level (1 = Entry, 5 = Senior)",
+    y        = "Proportion (%)"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(plot.title = element_text(face = "bold"))
+
+print(plot_2_2b)
+
+
+# ── 2-2c: Bar Chart – Attrition Rate by Job Level ───────────
+# Shows whether job level drives attrition, with bars coloured
+# by average stagnation score to visually link job level
+# as a root factor behind both stagnation and attrition.
+
+attrition_by_level <- df %>%
+  group_by(job_level) %>%
+  summarise(
+    total          = n(),
+    left           = sum(attrition == "Yes"),
+    attrition_pct  = round(left / total * 100, 1),
+    avg_stagnation = round(mean(stagnation_score), 2),
+    .groups = "drop"
+  )
+
+cat("\nAttrition Rate and Average Stagnation Score by Job Level:\n")
+print(as.data.frame(attrition_by_level))
+
+plot_2_2c <- ggplot(attrition_by_level,
+                    aes(x = job_level,
+                        y = attrition_pct,
+                        fill = avg_stagnation)) +
+  geom_col(width = 0.6) +
+  geom_text(aes(label = paste0(attrition_pct, "%")),
+            vjust = -0.5, size = 4, fontface = "bold") +
+  scale_fill_gradient(low = "#C8E6C9", high = "#F44336",
+                      name = "Avg Stagnation Score") +
+  labs(
+    title    = "Analysis 2-2c: Attrition Rate (%) by Job Level",
+    subtitle = "Bar colour = average stagnation score (red = more stagnant)",
+    x        = "Job Level (1 = Entry, 5 = Senior)",
+    y        = "Attrition Rate (%)"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(plot.title = element_text(face = "bold"))
+
+print(plot_2_2c)
+
+
+# ============================================================
+# Cheah Xue Xian TP076244
+# ============================================================
+# OBJECTIVE 3 (CHEAH XUE XIAN):
+# To investigate how work-life and lifestyle factors contribute
+# to employee attrition.
+#
+# Analysis 3-1: Does OverTime have a significant relationship with employee attrition?
+# Analysis 3-2: What is the distribution of attrition across WorkLifeBalance levels?
+# Analysis 3-3: Does DistanceFromHome affect employee attrition?
+# Analysis 3-4: Does BusinessTravel frequency contribute to employee attrition?
+# ============================================================
+
+library(ggplot2)
+library(dplyr)
+
+# Load cleaned dataset
+df <- read.csv("employee_attrition_clean.csv", stringsAsFactors = FALSE)
+
+# Convert attrition to factor
+df$attrition <- factor(df$attrition, levels = c("No", "Yes"))
+
+# ============================================================
+# ANALYSIS 3-1: DIAGNOSTIC ANALYSIS
+# Does OverTime have a significant relationship with attrition?
+# ============================================================
+
+cat("============================================================\n")
+cat("ANALYSIS 3-1: OVERTIME VS ATTRITION\n")
+cat("============================================================\n\n")
+
+# Summary table
+overtime_summary <- df %>%
+  group_by(overtime, attrition) %>%
+  summarise(Count = n(), .groups = "drop") %>%
+  group_by(overtime) %>%
+  mutate(
+    Total = sum(Count),
+    Percentage = round(Count / Total * 100, 2)
+  )
+
+print(overtime_summary)
+
+# Chart
+p3_1 <- ggplot(overtime_summary,
+               aes(x = overtime, y = Percentage, fill = attrition)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  geom_text(aes(label = paste0(Percentage, "%")),
+            position = position_dodge(width = 0.9),
+            vjust = -0.5,
+            size = 4) +
+  labs(
+    title = "Attrition Rate by OverTime",
+    x = "OverTime",
+    y = "Percentage (%)",
+    fill = "Attrition"
+  ) +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"))
+
+print(p3_1)
+
+ggsave("analysis_3_1_overtime_attrition.png",
+       plot = p3_1, width = 7, height = 5, dpi = 300)
+
+
+
+cat("============================================================\n")
+cat("ANALYSIS 3-2: WORKLIFEBALANCE VS ATTRITION\n")
+cat("============================================================\n\n")
+
+# Summary table
+wlb_summary <- df %>%
+  group_by(worklifebalance, attrition) %>%
+  summarise(Count = n(), .groups = "drop") %>%
+  group_by(worklifebalance) %>%
+  mutate(
+    Total = sum(Count),
+    Percentage = round(Count / Total * 100, 2)
+  )
+
+print(wlb_summary)
+
+# Attrition rate only
+wlb_attrition <- wlb_summary %>%
+  filter(attrition == "Yes")
+
+# Bar Chart
+p3_2 <- ggplot(
+  wlb_attrition,
+  aes(
+    x = worklifebalance,
+    y = Percentage,
+    fill = worklifebalance
+  )
+) +
+  geom_bar(
+    stat = "identity",
+    width = 0.7
+  ) +
+  geom_text(
+    aes(label = paste0(Percentage, "%")),
+    vjust = -0.5,
+    size = 4
+  ) +
+  labs(
+    title = "Distribution of Employee Attrition Across WorkLifeBalance Levels",
+    x = "WorkLifeBalance",
+    y = "Attrition Percentage (%)"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(
+      hjust = 0.5,
+      face = "bold"
+    ),
+    legend.position = "none"
+  )
+
+print(p3_2)
+
+cat("============================================================\n")
+cat("ANALYSIS 3-3: BUSINESS TRAVEL VS ATTRITION\n")
+cat("============================================================\n\n")
+
+# Summary table
+travel_summary <- df %>%
+  group_by(businesstravel, attrition) %>%
+  summarise(Count = n(), .groups = "drop") %>%
+  group_by(businesstravel) %>%
+  mutate(
+    Total = sum(Count),
+    Percentage = round(Count / Total * 100, 2)
+  )
+
+print(travel_summary)
+
+# Chart
+p3_3 <- ggplot(travel_summary,
+               aes(x = businesstravel, y = Percentage, fill = attrition)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  geom_text(aes(label = paste0(Percentage, "%")),
+            position = position_dodge(width = 0.9),
+            vjust = -0.5,
+            size = 4) +
+  labs(
+    title = "Attrition Rate by BusinessTravel",
+    x = "BusinessTravel",
+    y = "Percentage (%)",
+    fill = "Attrition"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold"),
+    axis.text.x = element_text(angle = 15, hjust = 1)
+  )
+
+print(p3_3)
+
+ggsave("analysis_3_3_businesstravel_attrition.png",
+       plot = p3_3, width = 7, height = 5, dpi = 300)
+
+
+
+
+cat("============================================================\n")
+cat("ANALYSIS 3-4: DISTANCE FROM HOME VS ATTRITION\n")
+cat("============================================================\n\n")
+
+# Summary table
+distance_summary <- df %>%
+  group_by(attrition) %>%
+  summarise(
+    Count = n(),
+    Mean_Distance = round(mean(distancefromhome), 2),
+    Median_Distance = median(distancefromhome),
+    Min_Distance = min(distancefromhome),
+    Max_Distance = max(distancefromhome),
+    .groups = "drop"
+  )
+
+print(distance_summary)
+
+# Chart
+p3_4 <- ggplot(df,
+               aes(x = attrition, y = distancefromhome, fill = attrition)) +
+  geom_boxplot(outlier.colour = "red",
+               outlier.shape = 16,
+               outlier.size = 2) +
+  labs(
+    title = "Distance From Home by Attrition",
+    x = "Attrition",
+    y = "Distance From Home"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold"),
+    legend.position = "none"
+  )
+
+print(p3_4)
+
+ggsave("analysis_3_4_distancefromhome_attrition.png",
+       plot = p3_4, width = 7, height = 5, dpi = 300)
+
+# ============================================================
+# Joanne Lee Jia Tian, TP076906
+# ============================================================
+#
+# OBJECTIVE 3 (TP076906 - Joanne Lee Jia Tian):
+# To investigate the impact of workplace engagement and
+# managerial relationships on employee attrition.
+#
+# Analysis 3-1: What is the attrition profile across the
+#               4 key variables? (Descriptive)
+# Analysis 3-2: Is the association between each variable
+#               and attrition statistically real or just
+#               random? (Diagnostic)
+# Analysis 3-3: Does a long-tenured manager relationship
+#               protect engaged employees from leaving?
+#               (Interaction)
+# ============================================================
+
+
+# ============================================================
+# LOAD LIBRARIES
+# ============================================================
+
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+
+# ============================================================
+# DATA TRANSFORMATION
+# ============================================================
+
+# Convert ordinal factors to numeric for regression (1 = Low, 4 = Very High)
+df$rel_sat_num <- as.numeric(df$relationship_satisfaction)
+df$env_sat_num <- as.numeric(df$environment_satisfaction)
+df$job_inv_num <- as.numeric(df$job_involvement)
+
+# Group years_with_curr_manager into tenure bands for interaction analysis
+df$manager_tenure <- cut(df$years_with_curr_manager,
+                         breaks = c(-1, 2, 6, 17),
+                         labels = c("New (0-2 yrs)",
+                                    "Moderate (3-6 yrs)",
+                                    "Long (7+ yrs)"))
+
+
+# ============================================================
+# ANALYSIS 3-1: DESCRIPTIVE ANALYSIS
+# What is the attrition profile across the 4 key variables?
+# ============================================================
+
+cat("============================================================\n")
+cat("ANALYSIS 3-1: DESCRIPTIVE ANALYSIS\n")
+cat("============================================================\n\n")
+
+
+# --- 3-1A: Attrition Rate by Relationship Satisfaction,
+#           Environment Satisfaction & Job Involvement ---
+cat("--- Attrition Rate by Relationship Satisfaction,")
+cat(" Environment Satisfaction & Job Involvement ---\n")
+
+rel_summary <- df %>%
+  group_by(relationship_satisfaction) %>%
+  summarise(attrition_rate = round(mean(attrition_bin) * 100, 1),
+            .groups = "drop")
+
+env_summary <- df %>%
+  group_by(environment_satisfaction) %>%
+  summarise(attrition_rate = round(mean(attrition_bin) * 100, 1),
+            .groups = "drop")
+
+job_summary <- df %>%
+  group_by(job_involvement) %>%
+  summarise(attrition_rate = round(mean(attrition_bin) * 100, 1),
+            .groups = "drop")
+
+combined_summary <- bind_rows(
+  rel_summary %>%
+    mutate(Variable = "Relationship Satisfaction",
+           Level    = as.character(relationship_satisfaction)) %>%
+    select(Variable, Level, attrition_rate),
+  env_summary %>%
+    mutate(Variable = "Environment Satisfaction",
+           Level    = as.character(environment_satisfaction)) %>%
+    select(Variable, Level, attrition_rate),
+  job_summary %>%
+    mutate(Variable = "Job Involvement",
+           Level    = as.character(job_involvement)) %>%
+    select(Variable, Level, attrition_rate)
+) %>%
+  mutate(
+    Level    = factor(Level, levels = c("Low", "Medium", "High", "Very High")),
+    Variable = factor(Variable, levels = c("Relationship Satisfaction",
+                                           "Environment Satisfaction",
+                                           "Job Involvement"))
+  )
+
+print(combined_summary)
+
+p3_1a <- ggplot(combined_summary,
+                aes(x = Level, y = attrition_rate, fill = Variable)) +
+  geom_bar(stat = "identity", width = 0.5) +
+  geom_text(aes(label = paste0(attrition_rate, "%")),
+            vjust = -0.5, size = 3.5) +
+  scale_fill_manual(values = c("Relationship Satisfaction" = "#F44336",
+                               "Environment Satisfaction"  = "#2196F3",
+                               "Job Involvement"           = "#4CAF50")) +
+  facet_wrap(~ Variable) +
+  labs(title = "Attrition Rate by Satisfaction & Involvement Levels",
+       x = "Level", y = "Attrition Rate (%)") +
+  theme_minimal() +
+  theme(plot.title     = element_text(hjust = 0.5, face = "bold"),
+        strip.text     = element_text(face = "bold"),
+        legend.position = "none")
+print(p3_1a)
+
+
+# --- 3-1B: Years With Current Manager by Attrition ---
+cat("\n--- Years With Current Manager Summary by Attrition ---\n")
+
+mgr_summary <- df %>%
+  group_by(attrition) %>%
+  summarise(
+    Count  = n(),
+    Mean   = round(mean(years_with_curr_manager), 2),
+    Median = median(years_with_curr_manager),
+    SD     = round(sd(years_with_curr_manager), 2),
+    Min    = min(years_with_curr_manager),
+    Max    = max(years_with_curr_manager),
+    .groups = "drop"
+  )
+print(mgr_summary)
+
+p3_1b <- ggplot(df, aes(x = attrition,
+                        y = years_with_curr_manager,
+                        fill = attrition)) +
+  geom_boxplot(outlier.colour = "red", outlier.shape = 16,
+               outlier.size = 2) +
+  stat_summary(fun = mean, geom = "point", shape = 23,
+               size = 4, fill = "yellow") +
+  scale_fill_manual(values = c("No" = "#2196F3", "Yes" = "#F44336")) +
+  labs(title = "Years With Current Manager by Attrition",
+       x = "Attrition", y = "Years With Current Manager") +
+  theme_minimal() +
+  theme(legend.position = "none",
+        plot.title      = element_text(hjust = 0.5, face = "bold"))
+print(p3_1b)
+
+cat("\n Analysis 3-1 complete. \n")
+
+
+# ============================================================
+# ANALYSIS 3-2: DIAGNOSTIC ANALYSIS
+# Is the association between each variable and attrition
+# statistically real or just random?
+# ============================================================
+
+cat("============================================================\n")
+cat("ANALYSIS 3-2: DIAGNOSTIC ANALYSIS\n")
+cat("============================================================\n\n")
+
+
+# --- 3-2A: Chi-Square Test of Independence ---
+# Tests whether attrition is independent of each
+# satisfaction/involvement variable.
+# A p-value < 0.05 indicates a statistically significant association.
+
+cat("--- Chi-Square Test: relationship_satisfaction vs Attrition ---\n")
+tbl_rel <- table(df$relationship_satisfaction, df$attrition)
+chi_rel <- chisq.test(tbl_rel)
+print(chi_rel)
+cat("Conclusion:", ifelse(chi_rel$p.value < 0.05,
+                          "Significant association (p < 0.05)",
+                          "No significant association (p >= 0.05)"), "\n\n")
+
+cat("--- Chi-Square Test: environment_satisfaction vs Attrition ---\n")
+tbl_env <- table(df$environment_satisfaction, df$attrition)
+chi_env <- chisq.test(tbl_env)
+print(chi_env)
+cat("Conclusion:", ifelse(chi_env$p.value < 0.05,
+                          "Significant association (p < 0.05)",
+                          "No significant association (p >= 0.05)"), "\n\n")
+
+cat("--- Chi-Square Test: job_involvement vs Attrition ---\n")
+tbl_job <- table(df$job_involvement, df$attrition)
+chi_job <- chisq.test(tbl_job)
+print(chi_job)
+cat("Conclusion:", ifelse(chi_job$p.value < 0.05,
+                          "Significant association (p < 0.05)",
+                          "No significant association (p >= 0.05)"), "\n\n")
+
+
+# --- 3-2B: Point-Biserial Correlation + Mann-Whitney U Test ---
+# Point-Biserial measures the linear relationship between the
+# continuous years_with_curr_manager and binary attrition (0/1).
+# Mann-Whitney U is applied as a non-parametric complement
+# given the skewed distribution observed in Analysis 3-1B.
+
+cat("--- Point-Biserial Correlation: years_with_curr_manager vs Attrition ---\n")
+pb_corr <- cor.test(df$years_with_curr_manager, df$attrition_bin,
+                    method = "pearson")
+print(pb_corr)
+
+r_value <- round(pb_corr$estimate, 4)
+
+interpret_r <- function(r) {
+  r <- abs(r)
+  if (r < 0.1)      return("Negligible")
+  else if (r < 0.3) return("Small")
+  else if (r < 0.5) return("Moderate")
+  else              return("Strong")
+}
+
+cat("Correlation coefficient (r):", r_value, "\n")
+cat("Effect Size Interpretation  :", interpret_r(r_value), "\n")
+cat("Conclusion:", ifelse(pb_corr$p.value < 0.05,
+                          "Significant correlation (p < 0.05)",
+                          "No significant correlation (p >= 0.05)"), "\n")
+cat("Direction:", ifelse(pb_corr$estimate < 0,
+                         "Negative - more years with manager = lower attrition risk",
+                         "Positive - more years with manager = higher attrition risk"),
+    "\n\n")
+
+cat("--- Mann-Whitney U Test: years_with_curr_manager vs Attrition ---\n")
+mw_test <- wilcox.test(years_with_curr_manager ~ attrition, data = df)
+print(mw_test)
+cat("Conclusion:", ifelse(mw_test$p.value < 0.05,
+                          "Significant difference between groups (p < 0.05)",
+                          "No significant difference between groups (p >= 0.05)"),
+    "\n\n")
+
+
+# --- 3-2C: Combined Statistical Summary Table ---
+stat_summary_tbl <- data.frame(
+  Variable = c("relationship_satisfaction",
+               "environment_satisfaction",
+               "job_involvement",
+               "years_with_curr_manager",
+               "years_with_curr_manager"),
+  Test     = c("Chi-Square", "Chi-Square", "Chi-Square",
+               "Point-Biserial Correlation",
+               "Mann-Whitney U Test"),
+  Statistic = c(round(chi_rel$statistic, 3),
+                round(chi_env$statistic, 3),
+                round(chi_job$statistic, 3),
+                round(pb_corr$statistic, 3),
+                round(mw_test$statistic, 3)),
+  P_Value  = c(round(chi_rel$p.value, 4),
+               round(chi_env$p.value, 4),
+               round(chi_job$p.value, 4),
+               round(pb_corr$p.value, 4),
+               round(mw_test$p.value, 4)),
+  Significant = c(chi_rel$p.value < 0.05,
+                  chi_env$p.value < 0.05,
+                  chi_job$p.value < 0.05,
+                  pb_corr$p.value < 0.05,
+                  mw_test$p.value < 0.05)
+)
+print(stat_summary_tbl)
+
+
+# --- 3-2D: Combined Chi-Square Residual Heatmap ---
+# Residuals reveal which specific cells drive the
+# significant Chi-Square results.
+
+rel_residuals           <- as.data.frame(chi_rel$residuals)
+colnames(rel_residuals) <- c("Level", "Attrition", "Residual")
+rel_residuals$Variable  <- "Relationship Satisfaction"
+
+env_residuals           <- as.data.frame(chi_env$residuals)
+colnames(env_residuals) <- c("Level", "Attrition", "Residual")
+env_residuals$Variable  <- "Environment Satisfaction"
+
+job_residuals           <- as.data.frame(chi_job$residuals)
+colnames(job_residuals) <- c("Level", "Attrition", "Residual")
+job_residuals$Variable  <- "Job Involvement"
+
+combined_residuals <- bind_rows(rel_residuals,
+                                env_residuals,
+                                job_residuals) %>%
+  mutate(
+    Level    = factor(Level,
+                      levels = c("Low", "Medium", "High", "Very High")),
+    Variable = factor(Variable,
+                      levels = c("Relationship Satisfaction",
+                                 "Environment Satisfaction",
+                                 "Job Involvement"))
+  )
+
+p3_2d <- ggplot(combined_residuals,
+                aes(x = Attrition, y = Level, fill = Residual)) +
+  geom_tile(color = "white") +
+  geom_text(aes(label = round(Residual, 2)), size = 4) +
+  scale_fill_gradient2(low  = "#2196F3", mid = "white",
+                       high = "#F44336", midpoint = 0) +
+  facet_wrap(~ Variable) +
+  labs(title = "Chi-Square Residuals by Variable and Attrition",
+       x = "Attrition", y = "Level",
+       fill = "Residual") +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"),
+        strip.text = element_text(face = "bold"))
+print(p3_2d)
+
+cat("\n Analysis 3-2 complete. \n")
+
+
+# ============================================================
+# ANALYSIS 3-3: INTERACTION ANALYSIS
+# Does a long-tenured manager relationship protect engaged
+# employees from leaving?
+# ============================================================
+
+cat("============================================================\n")
+cat("ANALYSIS 3-3: INTERACTION ANALYSIS\n")
+cat("============================================================\n\n")
+
+
+# Helper: compute attrition % by any variable x manager_tenure
+# Avoids copy-pasting the same pipeline for each variable.
+make_interact_summary <- function(data, var_col) {
+  data %>%
+    group_by(manager_tenure, across(all_of(var_col)), attrition) %>%
+    summarise(Count = n(), .groups = "drop") %>%
+    group_by(manager_tenure, across(all_of(var_col))) %>%
+    mutate(
+      Total      = sum(Count),
+      Percentage = round(Count / Total * 100, 1)
+    ) %>%
+    ungroup() %>%
+    filter(attrition == "Yes")
+}
+
+
+# --- 3-3A: Attrition Rate Heatmap: Job Involvement x Manager Tenure ---
+cat("--- Attrition Rate Heatmap: Job Involvement x Manager Tenure ---\n")
+
+interact_summary <- make_interact_summary(df, "job_involvement")
+print(interact_summary)
+
+# Ensure correct ordering of axes
+interact_summary <- interact_summary %>%
+  mutate(
+    job_involvement = factor(job_involvement,
+                             levels = c("Low", "Medium",
+                                        "High", "Very High")),
+    manager_tenure  = factor(manager_tenure,
+                             levels = c("New (0-2 yrs)",
+                                        "Moderate (3-6 yrs)",
+                                        "Long (7+ yrs)"))
+  )
+
+p3_3a <- ggplot(interact_summary,
+                aes(x = manager_tenure,
+                    y = job_involvement,
+                    fill = Percentage)) +
+  geom_tile(color = "white", linewidth = 1) +
+  geom_text(aes(label = paste0(Percentage, "%")),
+            size = 5, fontface = "bold", color = "black") +
+  scale_fill_gradient2(low      = "#2196F3",
+                       mid      = "white",
+                       high     = "#F44336",
+                       midpoint = mean(interact_summary$Percentage),
+                       name     = "Attrition Rate (%)") +
+  labs(title = "Attrition Rate Heatmap: Job Involvement x Manager Tenure",
+       x = "Manager Tenure Group",
+       y = "Job Involvement") +
+  theme_minimal() +
+  theme(
+    plot.title   = element_text(hjust = 0.5, face = "bold", size = 13),
+    axis.text    = element_text(size = 11),
+    axis.title   = element_text(size = 11, face = "bold"),
+    legend.title = element_text(face = "bold"),
+    panel.grid   = element_blank()
+  )
+print(p3_3a)
+
+
+cat("\n Analysis 3-3 complete.\n")
+cat("\n All analyses complete.\n")
+
+
+# ============================================================
+# DATA ANALYSIS - OBJECTIVE 4
+# The Impact of Compensation and Rewards on Employee Attrition
+# Prepared by: [TP077096], [Lim Shu Ye] 
+# ============================================================
+
+# ==============Package Download --if needed==================
+# install.packages("dplyr")     
+# install.packages("ggplot2")     
+# install.packages("pROC")     
+
+# Load necessary libraries
+library(dplyr)
+library(ggplot2)
+library(pROC) 
+
+# Ensure 'attrition' is properly formatted for modeling
+df$attrition <- as.factor(df$attrition)
+df$attrition_bin <- ifelse(df$attrition == "Yes", 1, 0)
+
+# ============================================================
+# ANALYSIS 4-1: DESCRIPTIVE ANALYSIS
+# Ques: What is the baseline distribution of employee attrition across different
+# compensation and reward levels
+# ============================================================
+cat("\n============================================================\n")
+cat("ANALYSIS 4-1: DESCRIPTIVE STATISTICS\n")
+cat("============================================================\n")
+
+cat("\n--- Monthly Income Summary by Attrition ---\n")
+# Implicitly displays the summary table
+aggregate(monthly_income ~ attrition, data = df, summary)
+
+cat("\n--- Stock Option Attrition Percentages ---\n")
+stock_summary <- df %>%
+  group_by(stock_option_level, attrition) %>%
+  summarise(Count = n(), .groups = 'drop') %>%
+  group_by(stock_option_level) %>%
+  mutate(Percentage = round(Count / sum(Count) * 100, 1)) %>%
+  filter(attrition == "Yes")
+
+# Implicitly displays the stock summary table
+stock_summary
+
+# Visual 1: Monthly Income Boxplot
+p1 <- ggplot(df, aes(x = attrition, y = monthly_income, fill = attrition)) +
+  geom_boxplot(alpha = 0.8) +
+  scale_fill_manual(values = c("No" = "#4CAF50", "Yes" = "#F44336")) +
+  theme_minimal() +
+  labs(title = "Monthly Income Distribution by Attrition Status",
+       x = "Employee Attrition", y = "Monthly Income (RM)")
+
+# Displays the plot
+p1
+
+# Visual 2: Stock Option Level Proportional Bar Chart
+p2 <- ggplot(df, aes(x = factor(stock_option_level), fill = attrition)) +
+  geom_bar(position = "fill", alpha = 0.9) +
+  scale_fill_manual(values = c("No" = "#4CAF50", "Yes" = "#F44336")) +
+  scale_y_continuous(labels = scales::percent_format()) +
+  theme_minimal() +
+  labs(title = "Attrition Proportion across Stock Option Levels",
+       x = "Stock Option Level", y = "Proportion of Employees")
+
+# Displays the Bar Chart
+p2
+
+# ============================================================
+# ANALYSIS 4-2: DIAGNOSTIC ANALYSIS
+# Ques: Are the observed compensation disparities statistically significant, or 
+# could they be attributed to random chance within the dataset?
+# ============================================================
+cat("\n============================================================\n")
+cat("ANALYSIS 4-2: DIAGNOSTIC STATISTICAL TESTING\n")
+cat("============================================================\n")
+
+cat("\n--- Point-Biserial Correlation: Monthly Income ---\n")
+income_test <- cor.test(df$monthly_income, df$attrition_bin)
+income_test
+
+cat("\n--- Point-Biserial Correlation: Percent Salary Hike ---\n")
+hike_test <- cor.test(df$percent_salary_hike, df$attrition_bin)
+hike_test
+
+cat("\n--- Chi-Square Test: Stock Option Level ---\n")
+stock_table <- table(df$stock_option_level, df$attrition)
+
+stock_table 
+chisq.test(stock_table)
+
+# ============================================================
+# ANALYSIS 4-3: INTERACTION ANALYSIS
+# Ques: How do Job Level and Stock Options interact to influence employee attrition?
+# ============================================================
+cat("\n============================================================\n")
+cat("ANALYSIS 4-3: INTERACTION ANALYSIS\n")
+cat("============================================================\n")
+
+# Calculate attrition rate for every combination
+interaction_data <- df %>%
+  group_by(job_level, stock_option_level) %>%
+  summarise(Attrition_Rate = mean(attrition_bin) * 100, .groups = 'drop')
+
+# Visual 3: Interaction Heatmap
+p3 <- ggplot(interaction_data, aes(x = factor(stock_option_level), y = factor(job_level), fill = Attrition_Rate)) +
+  geom_tile(color = "white", linewidth = 1) +
+  geom_text(aes(label = sprintf("%.1f%%", Attrition_Rate)), color = "black", fontface = "bold") +
+  scale_fill_gradient(low = "#E8F5E9", high = "#E53935") +
+  theme_minimal() +
+  labs(title = "Attrition Risk Heatmap: Job Level vs. Stock Options",
+       x = "Stock Option Level", y = "Job Level", fill = "Attrition Rate (%)")
+
+# Displays the heatmap
+p3
+
+# ============================================================
+# ANALYSIS 4-4: PREDICTIVE ANALYSIS
+# Ques: Which compensation factor is the strongest predictor of employee
+# attrition, and how accurate is this prediction?
+# ============================================================
+cat("\n============================================================\n")
+cat("ANALYSIS 4-4: PREDICTIVE LOGISTIC REGRESSION\n")
+cat("============================================================\n")
+
+attrition_model <- glm(attrition_bin ~ monthly_income + percent_salary_hike + 
+                         as.numeric(job_level) + as.numeric(stock_option_level), 
+                       data = df, family = "binomial")
+
+cat("\n--- Logistic Regression Model Summary ---\n")
+summary(attrition_model)
+
+cat("\n--- Odds Ratios (Risk Multipliers) ---\n")
+odds_ratios <- exp(coef(attrition_model))
+odds_ratios
+
+# Generate probabilities for plotting
+df$predicted_probability <- predict(attrition_model, type = "response")
+
+# Visual 4: Predicted Probability Curve
+p4 <- ggplot(df, aes(x = monthly_income, y = predicted_probability)) +
+  geom_point(alpha = 0.15, color = "#1976D2") +
+  geom_smooth(method = "glm", method.args = list(family = "binomial"), color = "#D32F2F", linewidth = 1.2) +
+  theme_minimal() +
+  labs(title = "Predicted Attrition Probability based on Monthly Income",
+       x = "Monthly Income (RM)", y = "Probability of Resignation (0 to 1)")
+
+# Displays the probability curve
+p4
+
+# Evaluate Model Accuracy (ROC/AUC)
+roc_obj <- roc(df$attrition_bin, df$predicted_probability, quiet = TRUE)
+auc_val <- round(auc(roc_obj), 4)
+
+cat("\n--- Model Evaluation ---\n")
+cat("AUC Score:", auc_val, "\n\n")
+
+roc_data <- data.frame(
+  Specificity = 1 - roc_obj$specificities, 
+  Sensitivity = roc_obj$sensitivities
+)
+
+# Visual 5: ROC Curve
+p5 <- ggplot(roc_data, aes(x = Specificity, y = Sensitivity)) +
+  geom_line(color = "#D32F2F", linewidth = 1.2) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "gray50") +
+  annotate("text", x = 0.75, y = 0.25, label = paste0("AUC = ", auc_val), 
+           size = 6, color = "#D32F2F", fontface = "bold") +
+  theme_minimal() +
+  labs(title = "ROC Curve - Compensation Attrition Model",
+       x = "False Positive Rate (1 - Specificity)",
+       y = "True Positive Rate (Sensitivity)")
+
+# Displays the ROC curve
+p5
+
+cat("\n=== OBJECTIVE 4 ANALYSIS COMPLETE ===\n")
+
+
+
+
+
+
+
+
+
+
+
